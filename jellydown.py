@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import os
 import math
 import requests
 import json
@@ -57,9 +58,37 @@ def episode_filename(item: dict, default_ext: str = ".mp4") -> str:
 
     return sanitize_filename(base) + default_ext
 
+
+def get_ffmpeg_path():
+    # Check PATH first
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+
+    # Check common Winget location on Windows
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            winget_dir = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+            if winget_dir.exists():
+                # Search for ffmpeg.exe in subdirectories
+                matches = list(winget_dir.rglob("ffmpeg.exe"))
+                if matches:
+                    # Return the first match found
+                    return str(matches[0])
+    return None
+
 def download_with_ffmpeg(stream_url: str, output_path: Path):
+    ffmpeg_path = get_ffmpeg_path()
+    if not ffmpeg_path:
+        msg = "ffmpeg not found."
+        if sys.platform == "win32":
+            msg += "\nSuggest installing ffmpeg using: winget install Gyan.FFmpeg"
+        print(msg) # Print to stdout so user sees it before traceback
+        raise FileNotFoundError(msg)
+
     cmd = [
-        "ffmpeg",
+        ffmpeg_path,
         "-y",
         "-loglevel", "error",
         "-stats",
@@ -68,6 +97,64 @@ def download_with_ffmpeg(stream_url: str, output_path: Path):
         str(output_path),
     ]
     subprocess.run(cmd, check=True)
+
+def download_direct(base: str, api_key: str, item_id: str, output_path: Path):
+    """Download original file directly without transcoding."""
+    url = f"{base.rstrip('/')}/Items/{item_id}/Download?api_key={api_key}"
+    
+    print("Downloading original file (no transcoding)...")
+    response = requests.get(url, stream=True, timeout=TIMEOUT)
+    response.raise_for_status()
+    
+    total_size = int(response.headers.get('content-length', 0))
+    downloaded = 0
+    
+    with open(output_path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    percent = (downloaded / total_size) * 100
+                    print(f"\rProgress: {percent:.1f}% ({downloaded / 1e6:.1f}/{total_size / 1e6:.1f} MB)", end='')
+    print()  # New line after progress
+
+def should_skip_transcode(item: dict, bitrate: int) -> bool:
+    """Check if original file should be downloaded without transcoding.
+    
+    Returns True if:
+    - Bitrate is set to 0 (user wants original files always)
+    - Original file is already smaller than transcoded would be
+    """
+    # If bitrate is 0, always download original
+    if bitrate == 0:
+        print("Bitrate set to 0 - downloading original file.")
+        return True
+    
+    duration_ticks = item.get("RunTimeTicks")
+    ms = item.get("MediaSources") or []
+    
+    if not duration_ticks or not ms or not isinstance(ms, list) or not ms[0]:
+        return False
+    
+    original_size = ms[0].get("Size")
+    if not original_size:
+        return False
+    
+    # Convert duration from ticks to seconds (10,000 ticks = 1ms)
+    duration_seconds = duration_ticks / 10_000_000
+    
+    # Calculate expected transcoded size in bytes
+    bitrate_bytes_per_sec = bitrate / 8
+    expected_size = bitrate_bytes_per_sec * duration_seconds
+    
+    # If original is within 5% of expected, skip transcode
+    if original_size <= expected_size * 1.05:
+        print(f"Original size ({original_size / 1e6:.1f} MB) is already optimal.")
+        print(f"Skipping transcode (would be ~{expected_size / 1e6:.1f} MB).")
+        return True
+    
+    return False
 
 def prompt_int(prompt: str, default: int = 1, min_value: int = 1, max_value: int = 9999) -> int:
     raw = input(prompt).strip()
@@ -175,14 +262,15 @@ def build_hls_url(base, api_key, item_id, cfg, media_source_id=None):
     return f"{base.rstrip('/')}/Videos/{item_id}/master.m3u8?{urlencode(params)}"
 
 def ffmpeg_available():
-    return shutil.which("ffmpeg") is not None
+    return get_ffmpeg_path() is not None
 
 def settings_menu(cfg):
     while True:
         print("\n--- Settings ---")
         print(f"1. Video Codec ({cfg.get('VideoCodec')})")
         print(f"2. Audio Codec ({cfg.get('AudioCodec')})")
-        print(f"3. Video Bitrate ({cfg.get('VideoBitrate')})")
+        bitrate_display = "No transcoding (original files)" if cfg.get('VideoBitrate') == 0 else cfg.get('VideoBitrate')
+        print(f"3. Video Bitrate ({bitrate_display})")
         print(f"4. Audio Bitrate ({cfg.get('AudioBitrate')})")
         print(f"5. Max Audio Channels ({cfg.get('MaxAudioChannels')})")
         print("b. Back")
@@ -193,11 +281,36 @@ def settings_menu(cfg):
             break
         
         if choice == '1':
-            cfg["VideoCodec"] = input("Video Codec [h264]: ").strip() or "h264"
+            options = [
+                {"label": "H.264 (AVC) - Recommended, high compatibility", "value": "h264"},
+                {"label": "H.265 (HEVC) - High efficiency, requires hardware support", "value": "hevc"},
+                {"label": "Custom...", "value": "CUSTOM"}
+            ]
+            res = pick(options, title="Select Video Codec")
+            if res and res != "BACK":
+                if res == "CUSTOM":
+                    cfg["VideoCodec"] = input("Video Codec [h264]: ").strip() or "h264"
+                else:
+                    cfg["VideoCodec"] = res
+
         elif choice == '2':
-            cfg["AudioCodec"] = input("Audio Codec [aac]: ").strip() or "aac"
+            options = [
+                {"label": "AAC - Recommended, high compatibility", "value": "aac"},
+                {"label": "MP3", "value": "mp3"},
+                {"label": "AC3", "value": "ac3"},
+                {"label": "OPUS", "value": "opus"},
+                {"label": "Custom...", "value": "CUSTOM"}
+            ]
+            res = pick(options, title="Select Audio Codec")
+            if res and res != "BACK":
+                if res == "CUSTOM":
+                    cfg["AudioCodec"] = input("Audio Codec [aac]: ").strip() or "aac"
+                else:
+                    cfg["AudioCodec"] = res
+
         elif choice == '3':
-            cfg["VideoBitrate"] = prompt_int("Video Bitrate: ", default=4000000, max_value=100000000)
+            print("Video Bitrate (set to 0 to always download original files without transcoding)")
+            cfg["VideoBitrate"] = prompt_int("Video Bitrate: ", default=4000000, min_value=0, max_value=100000000)
             cfg["MaxStreamingBitrate"] = cfg["VideoBitrate"]
         elif choice == '4':
             cfg["AudioBitrate"] = prompt_int("Audio Bitrate: ", default=128000, max_value=1000000)
@@ -331,12 +444,26 @@ def process_download_or_stream(base, api_key, items, selected_index, cfg):
     dl = input("\nDownload? (y/N): ").strip().lower()
     if dl == "y":
         count = 1
-        # Only ask for count if it seems valid (e.g. series)
-        if len(items) > 1 and selected_index < len(items) - 1:
+        # Only ask for count if it's a series episode (not a movie)
+        if target_item.get("Type") != "Movie" and len(items) > 1 and selected_index < len(items) - 1:
+             print("\nYou can download multiple items in sequence. If you want your choice and the next 2 episodes, enter 3.")
              count = prompt_int("How many items to download (including this one)? [default 1]: ", default=1)
         
-        out_dir_raw = input("Output directory (blank = current folder): ").strip()
-        out_dir = Path(out_dir_raw) if out_dir_raw else Path(".")
+        # Get download path from config or prompt
+        default_path = cfg.get("download_path", "")
+        if default_path:
+            out_dir_raw = input(f"Output directory [blank = {default_path}]: ").strip()
+        else:
+            out_dir_raw = input("Output directory (blank = current folder): ").strip()
+        
+        if out_dir_raw:
+            out_dir = Path(out_dir_raw)
+            cfg["download_path"] = out_dir_raw
+            save_config(cfg)
+        elif default_path:
+            out_dir = Path(default_path)
+        else:
+            out_dir = Path(".")
 
         for i in range(selected_index, min(len(items), selected_index + count)):
             item = items[i]
@@ -351,7 +478,15 @@ def process_download_or_stream(base, api_key, items, selected_index, cfg):
 
             print(f"\nDownloading {filename}")
             print(f"-> {output_path}")
-            download_with_ffmpeg(stream_url, output_path)
+            
+            # Check if transcode is needed
+            bitrate = cfg.get("VideoBitrate", 4_000_000)
+            if should_skip_transcode(item, bitrate):
+                # Download original file directly
+                download_direct(base, api_key, item["Id"], output_path)
+            else:
+                # Download transcoded stream
+                download_with_ffmpeg(stream_url, output_path)
 
         print("\nDone.")
     
@@ -366,6 +501,14 @@ def main():
 
     if not base.startswith(("http://", "https://")):
         base = "http://" + base
+    
+    # Check if port is specified
+    from urllib.parse import urlparse
+    parsed = urlparse(base)
+    if not parsed.port:
+        add_port = input("No port specified. Add default port 8096? (Y/n): ").strip().lower()
+        if add_port != 'n':
+            base = f"{parsed.scheme}://{parsed.hostname}:8096{parsed.path}"
 
     api_key = (cfg.get("api_key") or "").strip()
     if not api_key:
