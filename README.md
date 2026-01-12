@@ -21,6 +21,53 @@ With hardware-accelerated transcoding support, you can optimize downloads for yo
 2. **FFmpeg** (required for transcoded downloads)
 3. **Python packages**: `requests` (automatically installed)
 
+### Installing Python
+
+#### Windows
+
+**Option 1: Using winget (Recommended)**
+```powershell
+winget install Python.Python.3.12
+```
+
+**Option 2: Microsoft Store**
+1. Open the Microsoft Store app
+2. Search for "Python 3.12" (or latest version)
+3. Click "Get" or "Install"
+
+**Option 3: Official Installer**
+1. Download from [python.org](https://www.python.org/downloads/)
+2. Run the installer
+3. **Important**: Check "Add Python to PATH" during installation
+
+**Verify installation:**
+```powershell
+python --version
+```
+
+#### Linux
+
+**Debian/Ubuntu:**
+```bash
+sudo apt update
+sudo apt install python3 python3-pip
+```
+
+**Fedora:**
+```bash
+sudo dnf install python3 python3-pip
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S python python-pip
+```
+
+**Verify installation:**
+```bash
+python3 --version
+```
+
 ### Installing FFmpeg
 
 #### Windows
