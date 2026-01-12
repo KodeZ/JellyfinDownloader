@@ -8,8 +8,9 @@ from pathlib import Path
 
 # Configuration management
 CONFIG_FILE = Path.home() / ".jellydown_config.json"
+BITS_TO_MBPS = 1_000_000  # Conversion factor for bits to Mbps
 DEFAULT_CONFIG = {
-    "video_bitrate": 4_000_000  # Default 4 Mbps
+    "video_bitrate": 4 * BITS_TO_MBPS  # Default 4 Mbps
 }
 
 def load_config() -> dict:
@@ -40,7 +41,7 @@ def show_config_menu():
         print("JellyfinDownloader - Configuration Menu")
         print("="*50)
         current_bitrate = config.get("video_bitrate", DEFAULT_CONFIG["video_bitrate"])
-        current_mbps = current_bitrate / 1_000_000
+        current_mbps = current_bitrate / BITS_TO_MBPS
         print(f"\nCurrent video bitrate: {current_mbps:.1f} Mbps ({current_bitrate:,} bps)")
         print("\nOptions:")
         print("  1. Set custom bitrate")
@@ -58,7 +59,7 @@ def show_config_menu():
                 if bitrate_mbps <= 0:
                     print("Bitrate must be positive!")
                     continue
-                config["video_bitrate"] = int(bitrate_mbps * 1_000_000)
+                config["video_bitrate"] = int(bitrate_mbps * BITS_TO_MBPS)
                 print(f"Bitrate set to {bitrate_mbps} Mbps ({config['video_bitrate']:,} bps)")
             except ValueError:
                 print("Invalid input! Please enter a number.")
@@ -66,11 +67,11 @@ def show_config_menu():
         elif choice == "2":
             print("\nPreset bitrates:")
             presets = [
-                ("1", "Low (1 Mbps)", 1_000_000),
-                ("2", "Medium (2 Mbps)", 2_000_000),
-                ("3", "High (4 Mbps)", 4_000_000),
-                ("4", "Very High (8 Mbps)", 8_000_000),
-                ("5", "Ultra (16 Mbps)", 16_000_000),
+                ("1", "Low (1 Mbps)", 1 * BITS_TO_MBPS),
+                ("2", "Medium (2 Mbps)", 2 * BITS_TO_MBPS),
+                ("3", "High (4 Mbps)", 4 * BITS_TO_MBPS),
+                ("4", "Very High (8 Mbps)", 8 * BITS_TO_MBPS),
+                ("5", "Ultra (16 Mbps)", 16 * BITS_TO_MBPS),
             ]
             for num, label, _ in presets:
                 print(f"  {num}. {label}")
@@ -80,7 +81,7 @@ def show_config_menu():
             
             if preset_choice in preset_map:
                 config["video_bitrate"] = preset_map[preset_choice]
-                mbps = config["video_bitrate"] / 1_000_000
+                mbps = config["video_bitrate"] / BITS_TO_MBPS
                 print(f"Bitrate set to {mbps} Mbps ({config['video_bitrate']:,} bps)")
             else:
                 print("Invalid preset selection!")
@@ -225,5 +226,5 @@ if __name__ == "__main__":
         output_path = (p / derived_name) if p.exists() and p.is_dir() else p
 
     print(f"\nDownloading to:\n{output_path}")
-    print(f"Using bitrate: {video_bitrate / 1_000_000} Mbps")
+    print(f"Using bitrate: {video_bitrate / BITS_TO_MBPS} Mbps")
     download_with_ffmpeg(stream_url, output_path)
