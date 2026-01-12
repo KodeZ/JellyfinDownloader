@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 TIMEOUT = 30
-CONFIG_FILE = Path(__file__).with_name("jellyfin_browser.json")
+CONFIG_FILE = Path(__file__).with_name("jellydown.json")
 
 def load_config():
     if CONFIG_FILE.exists():
