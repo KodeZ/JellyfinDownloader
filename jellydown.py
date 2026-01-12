@@ -147,7 +147,7 @@ def main():
 
     base = (cfg.get("server_url") or "").strip()
     if not base:
-        base = input("Jellyfin server URL (e.g. http://10.0.0.11:8096): ").strip()
+        base = input("Jellyfin server URL (e.g. http://192.168.0.1:8096): ").strip()
 
     if not base.startswith(("http://", "https://")):
         base = "http://" + base
