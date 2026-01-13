@@ -1,8 +1,8 @@
 # JellyfinDownloader
 
-A Python script for downloading movies and TV series from your Jellyfin media server. Supports both direct downloads (original files) and transcoded downloads with customizable quality settings.
+A Python script for downloading movies and TV series from your Jellyfin media server. Downloads streams directly from Jellyfin with server-side transcoding, or download original files without any transcoding.
 
-With hardware-accelerated transcoding support, you can optimize downloads for your device while minimizing server load. As the transcoding happens like a normal Jellyfin stream, you can take advantage of your server's hardware capabilities. The streaming typically goes 10-20x faster than real-time, making downloads quick and efficient.
+Transcoding happens server-side just like normal Jellyfin streaming, allowing you to take advantage of your server's hardware acceleration capabilities. Downloads typically run 10-20x faster than real-time, making it quick and efficient.
 
 ## Features
 
@@ -18,8 +18,7 @@ With hardware-accelerated transcoding support, you can optimize downloads for yo
 ### Required Software
 
 1. **Python 3.7+**
-2. **FFmpeg** (required for transcoded downloads)
-3. **Python packages**: `requests` (automatically installed)
+2. **Python packages**: `requests` (automatically installed)
 
 ### Installing Python
 
@@ -66,45 +65,6 @@ sudo pacman -S python python-pip
 **Verify installation:**
 ```bash
 python3 --version
-```
-
-### Installing FFmpeg
-
-#### Windows
-
-**Option 1: Using winget (Recommended)**
-```powershell
-winget install Gyan.FFmpeg
-```
-
-**Option 2: Manual Installation**
-1. Download FFmpeg from [ffmpeg.org](https://ffmpeg.org/download.html)
-2. Extract the archive to a location (e.g., `C:\ffmpeg`)
-3. Add the `bin` folder to your system PATH
-
-**Note**: The script automatically searches for FFmpeg in the WinGet packages directory if it's not in your PATH.
-
-#### Linux
-
-**Debian/Ubuntu:**
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
-
-**Fedora:**
-```bash
-sudo dnf install ffmpeg
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S ffmpeg
-```
-
-**From source:**
-```bash
-# Check your distribution's documentation for building from source
 ```
 
 ### Installing Python Dependencies
@@ -199,10 +159,6 @@ Settings are stored in `jellydown.json`:
 ```
 
 ## Troubleshooting
-
-### "ffmpeg not found"
-- **Windows**: Make sure FFmpeg is installed via winget or added to PATH
-- **Linux**: Install ffmpeg using your package manager
 
 ### "Authentication failed"
 - Verify your username and password

@@ -5,9 +5,7 @@ import math
 import requests
 import json
 import re
-import subprocess
 import getpass
-import shutil
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -58,48 +56,52 @@ def episode_filename(item: dict, default_ext: str = ".mp4") -> str:
 
     return sanitize_filename(base) + default_ext
 
-
-def get_ffmpeg_path():
-    # Check PATH first
-    path = shutil.which("ffmpeg")
-    if path:
-        return path
-
-    # Check common Winget location on Windows
-    if sys.platform == "win32":
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            winget_dir = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
-            if winget_dir.exists():
-                # Search for ffmpeg.exe in subdirectories
-                matches = list(winget_dir.rglob("ffmpeg.exe"))
-                if matches:
-                    # Return the first match found
-                    return str(matches[0])
-    return None
-
-def download_with_ffmpeg(stream_url: str, output_path: Path):
-    ffmpeg_path = get_ffmpeg_path()
-    if not ffmpeg_path:
-        msg = "ffmpeg not found."
-        if sys.platform == "win32":
-            msg += "\nSuggest installing ffmpeg using: winget install Gyan.FFmpeg"
-        print(msg) # Print to stdout so user sees it before traceback
-        raise FileNotFoundError(msg)
-
-    cmd = [
-        ffmpeg_path,
-        "-y",
-        "-loglevel", "error",
-        "-stats",
-        "-i", stream_url,
-        "-c", "copy",
-        str(output_path),
-    ]
-    subprocess.run(cmd, check=True)
+def download_stream(stream_url: str, output_path: Path, estimated_size: int = 0):
+    """Download stream directly using requests."""
+    import time
+    
+    response = requests.get(stream_url, stream=True, timeout=TIMEOUT)
+    response.raise_for_status()
+    
+    total_size = int(response.headers.get('content-length', 0))
+    if not total_size and estimated_size:
+        total_size = estimated_size
+    
+    downloaded = 0
+    start_time = time.time()
+    last_update = start_time
+    
+    with open(output_path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                current_time = time.time()
+                
+                # Update every 0.5 seconds
+                if current_time - last_update >= 0.5:
+                    elapsed = current_time - start_time
+                    speed = downloaded / elapsed if elapsed > 0 else 0
+                    
+                    if total_size > 0:
+                        percent = (downloaded / total_size) * 100
+                        remaining = total_size - downloaded
+                        eta = remaining / speed if speed > 0 else 0
+                        print(f"\rProgress: {percent:.1f}% ({downloaded / 1e6:.1f}/{total_size / 1e6:.1f} MB) "
+                              f"Speed: {speed / 1e6:.1f} MB/s ETA: {int(eta)}s", end='')
+                    else:
+                        print(f"\rDownloaded: {downloaded / 1e6:.1f} MB Speed: {speed / 1e6:.1f} MB/s", end='')
+                    
+                    last_update = current_time
+    
+    elapsed = time.time() - start_time
+    speed = downloaded / elapsed if elapsed > 0 else 0
+    print(f"\nCompleted: {downloaded / 1e6:.1f} MB in {elapsed:.1f}s (avg: {speed / 1e6:.1f} MB/s)")
 
 def download_direct(base: str, api_key: str, item_id: str, output_path: Path):
     """Download original file directly without transcoding."""
+    import time
+    
     url = f"{base.rstrip('/')}/Items/{item_id}/Download?api_key={api_key}"
     
     print("Downloading original file (no transcoding)...")
@@ -108,16 +110,35 @@ def download_direct(base: str, api_key: str, item_id: str, output_path: Path):
     
     total_size = int(response.headers.get('content-length', 0))
     downloaded = 0
+    start_time = time.time()
+    last_update = start_time
     
     with open(output_path, 'wb') as f:
         for chunk in response.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
                 downloaded += len(chunk)
-                if total_size > 0:
-                    percent = (downloaded / total_size) * 100
-                    print(f"\rProgress: {percent:.1f}% ({downloaded / 1e6:.1f}/{total_size / 1e6:.1f} MB)", end='')
-    print()  # New line after progress
+                current_time = time.time()
+                
+                # Update every 0.5 seconds
+                if current_time - last_update >= 0.5:
+                    elapsed = current_time - start_time
+                    speed = downloaded / elapsed if elapsed > 0 else 0
+                    
+                    if total_size > 0:
+                        percent = (downloaded / total_size) * 100
+                        remaining = total_size - downloaded
+                        eta = remaining / speed if speed > 0 else 0
+                        print(f"\rProgress: {percent:.1f}% ({downloaded / 1e6:.1f}/{total_size / 1e6:.1f} MB) "
+                              f"Speed: {speed / 1e6:.1f} MB/s ETA: {int(eta)}s", end='')
+                    else:
+                        print(f"\rDownloaded: {downloaded / 1e6:.1f} MB Speed: {speed / 1e6:.1f} MB/s", end='')
+                    
+                    last_update = current_time
+    
+    elapsed = time.time() - start_time
+    speed = downloaded / elapsed if elapsed > 0 else 0
+    print(f"\nCompleted: {downloaded / 1e6:.1f} MB in {elapsed:.1f}s (avg: {speed / 1e6:.1f} MB/s)")
 
 def should_skip_transcode(item: dict, bitrate: int) -> bool:
     """Check if original file should be downloaded without transcoding.
@@ -244,10 +265,11 @@ def format_episode_label(item):
         return f"S{s:02d}E{e:02d} - {name}"
     return name
 
-def build_hls_url(base, api_key, item_id, cfg, media_source_id=None):
-    # Some servers require MediaSourceId; if omitted and server rejects, user can fetch it later.
+def build_stream_url(base, api_key, item_id, cfg, media_source_id=None):
+    # Build stream URL with transcoding parameters
     params = {
         "api_key": api_key,
+        "container": "mp4",
         "VideoCodec": cfg.get("VideoCodec", "h264"),
         "AudioCodec": cfg.get("AudioCodec", "aac"),
         "VideoBitrate": cfg.get("VideoBitrate", 4_000_000),
@@ -255,14 +277,14 @@ def build_hls_url(base, api_key, item_id, cfg, media_source_id=None):
         "AudioBitrate": cfg.get("AudioBitrate", 128_000),
         "MaxAudioChannels": cfg.get("MaxAudioChannels", 2),
         "SubtitleMethod": cfg.get("SubtitleMethod", "Encode"),
+        "allowVideoStreamCopy": "true",
+        "allowAudioStreamCopy": "true",
     }
     if media_source_id:
         params["MediaSourceId"] = media_source_id
 
-    return f"{base.rstrip('/')}/Videos/{item_id}/master.m3u8?{urlencode(params)}"
+    return f"{base.rstrip('/')}/Videos/{item_id}/stream.mp4?{urlencode(params)}"
 
-def ffmpeg_available():
-    return get_ffmpeg_path() is not None
 
 def settings_menu(cfg):
     while True:
@@ -434,7 +456,7 @@ def process_download_or_stream(base, api_key, items, selected_index, cfg):
             if ms2 and isinstance(ms2, list) and isinstance(ms2[0], dict):
                 media_source_id = ms2[0].get("Id")
 
-        return build_hls_url(base, api_key, item_id, cfg, media_source_id=media_source_id)
+        return build_stream_url(base, api_key, item_id, cfg, media_source_id=media_source_id)
 
     target_item = items[selected_index]
     url = get_stream_url(target_item)
@@ -486,7 +508,18 @@ def process_download_or_stream(base, api_key, items, selected_index, cfg):
                 download_direct(base, api_key, item["Id"], output_path)
             else:
                 # Download transcoded stream
-                download_with_ffmpeg(stream_url, output_path)
+                # Calculate estimated size
+                duration_ticks = item.get("RunTimeTicks")
+                estimated_size = 0
+                if duration_ticks and bitrate > 0:
+                    duration_seconds = duration_ticks / 10_000_000
+                    # Total bitrate includes video + audio
+                    audio_bitrate = cfg.get("AudioBitrate", 128_000)
+                    total_bitrate = bitrate + audio_bitrate
+                    estimated_size = int((total_bitrate / 8) * duration_seconds)
+                    print(f"Estimated size: ~{estimated_size / 1e6:.1f} MB (based on {total_bitrate / 1e6:.1f} Mbps)")
+                
+                download_stream(stream_url, output_path, estimated_size)
 
         print("\nDone.")
     
@@ -536,19 +569,20 @@ def main():
     cfg["server_url"] = base
     cfg["api_key"] = api_key
     save_config(cfg)
-    
-    # Check for ffmpeg absence
-    if not ffmpeg_available():
-         print("Warning: ffmpeg not found in PATH. Downloading will fail.")
-    else:
-        print("ffmpeg is available.")
 
     # Determine UserId
-    me = jget(base, "/Users/Me", api_key)
-    user_id = me.get("Id")
-    if not user_id:
-        print("Could not determine UserId from /Users/Me")
-        sys.exit(1)
+    try:
+        me = jget(base, "/Users/Me", api_key)
+        user_id = me.get("Id")
+        if not user_id:
+            print("Could not determine UserId from /Users/Me")
+            sys.exit(1)
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            print("\nAuthentication failed: Invalid or expired API key/token.")
+            print("Please delete jellydown.json and try again to re-authenticate.")
+            sys.exit(1)
+        raise
 
     print(f"\nConnected as: {me.get('Name','(unknown)')}  UserId: {user_id}")
 
