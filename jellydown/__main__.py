@@ -9,6 +9,50 @@ from .config import load_config, save_config
 from .api import jget, authenticate
 from .ui import handle_series, handle_movies, settings_menu
 
+
+def authentication_flow(base):
+    print("\nAuthentication required.")
+    print("1. Login with Username/Password (recommended)")
+    print("2. Enter API Key manually")
+    print("Note: Username/password is used only once to generate an access token.")
+    api_key = ""
+    while not api_key:
+        choice = input("Select [1/2]: ").strip()
+        if choice == "1":
+            username = input("Username: ").strip()
+            password = getpass.getpass("Password: ")
+            token = authenticate(base, username, password)
+            if token:
+                api_key = token
+                print("Login successful.")
+            else:
+                print("Login failed, please try again or use API key.")
+        elif choice == "2":
+            api_key = input("API key: ").strip()
+        else:
+            print("Invalid choice. Please enter 1 or 2.")
+    return api_key
+
+
+def determine_user_id(base, api_key):
+    try:
+        me = jget(base, "/Users/Me", api_key)
+        user_id = me.get("Id")
+        if not user_id:
+            print("Could not determine UserId from /Users/Me")
+            sys.exit(1)
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401 and base:
+            print("\nAuthentication failed: Invalid or expired API key/token. Trying to get a new one.")
+            api_key = authentication_flow(base)
+            me = jget(base, "/Users/Me", api_key)
+            user_id = me.get("Id")
+            return me, user_id, api_key
+        raise
+
+    return me, user_id, api_key
+
+
 def main():
     """Main application entry point."""
     cfg = load_config()
@@ -29,44 +73,13 @@ def main():
 
     api_key = (cfg.get("api_key") or "").strip()
     if not api_key:
-        print("\nAuthentication required.")
-        print("1. Login with Username/Password (recommended)")
-        print("2. Enter API Key manually")
-        print("Note: Username/password is used only once to generate an access token.")
-        
-        while not api_key:
-            choice = input("Select [1/2]: ").strip()
-            if choice == "1":
-                username = input("Username: ").strip()
-                password = getpass.getpass("Password: ")
-                token = authenticate(base, username, password)
-                if token:
-                    api_key = token
-                    print("Login successful.")
-                else:
-                    print("Login failed, please try again or use API key.")
-            elif choice == "2":
-                api_key = input("API key: ").strip()
-            else:
-                print("Invalid choice. Please enter 1 or 2.")
+        api_key = authentication_flow(base)
+
+    me, user_id, api_key = determine_user_id(base, api_key)
 
     cfg["server_url"] = base
     cfg["api_key"] = api_key
     save_config(cfg)
-
-    # Determine UserId
-    try:
-        me = jget(base, "/Users/Me", api_key)
-        user_id = me.get("Id")
-        if not user_id:
-            print("Could not determine UserId from /Users/Me")
-            sys.exit(1)
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            print("\nAuthentication failed: Invalid or expired API key/token.")
-            print("Please delete jellydown.json and try again to re-authenticate.")
-            sys.exit(1)
-        raise
 
     print(f"\nConnected as: {me.get('Name','(unknown)')}  UserId: {user_id}")
 

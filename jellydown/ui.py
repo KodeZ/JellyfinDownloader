@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 
 from .config import save_config
-from .api import jget, build_stream_url
+from .api import jget
 from .download import download_stream, download_direct, should_skip_transcode
 from .utils import sanitize_filename, episode_filename, safe_int, format_episode_label
 
@@ -176,7 +176,7 @@ def handle_series(base, api_key, user_id, cfg):
         if selected_index is None:
             continue
 
-        process_download_or_stream(base, api_key, episodes, selected_index, cfg)
+        process_download_or_stream(base, api_key, episodes, selected_index, cfg, user_id)
 
 def handle_movies(base, api_key, user_id, cfg):
     """Handle movie browsing and download."""
@@ -193,93 +193,189 @@ def handle_movies(base, api_key, user_id, cfg):
         if selected_index in (None, "BACK"):
             break
             
-        process_download_or_stream(base, api_key, movies, selected_index, cfg)
+        process_download_or_stream(base, api_key, movies, selected_index, cfg, user_id)
 
-def process_download_or_stream(base, api_key, items, selected_index, cfg):
-    """Process download or streaming for selected item."""
-    def get_stream_url(item: dict) -> str:
-        item_id = item["Id"]
-        ms = item.get("MediaSources") or []
-        media_source_id = None
-        if ms and isinstance(ms, list) and isinstance(ms[0], dict):
-            media_source_id = ms[0].get("Id")
 
-        if not media_source_id:
-            full = jget(base, f"/Items/{item_id}", api_key)
-            ms2 = full.get("MediaSources") or []
-            if ms2 and isinstance(ms2, list) and isinstance(ms2[0], dict):
-                media_source_id = ms2[0].get("Id")
+def get_subtitles(base, api_key, user_id, item_id, movie_or_episode_filename, output_dir):
+    import requests
+    import os
 
-        return build_stream_url(base, api_key, item_id, cfg, media_source_id=media_source_id)
+    # Ensure output directory exists
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # We remove the video extension from the filename
+    movie_or_episode_filename = os.path.splitext(movie_or_episode_filename)[0]
+
+    session = requests.Session()
+    # Jellyfin often requires the token in the header AND sometimes as a query param
+    session.headers.update({"X-Emby-Token": api_key})
+
+    playback_endpoint = f"{base}/Items/{item_id}/PlaybackInfo"
+
+    try:
+        response = session.post(playback_endpoint, params={"userId": user_id})
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"Failed to reach PlaybackInfo: {e}")
+        return
+
+    media_sources = data.get("MediaSources", [])
+
+    # Map Jellyfin Codecs to file extensions
+    codec_map = {
+        "subrip": "srt",
+        "srt": "srt",
+        "ass": "ass",
+        "ssa": "ass",
+        "mov_text": "srt",
+        "vtt": "vtt",
+        "pgssub": "sup",  # PGS is image-based
+        "pgs": "sup"
+    }
+
+    print(f"\n--- Subtitle List for {movie_or_episode_filename} ---")
+    subtitle_options = []
+    for source in media_sources:
+        s_id = source.get("Id")
+        for stream in source.get("MediaStreams", []):
+            if stream.get("Type") == "Subtitle":
+                raw_codec = stream.get("Codec", "srt").lower()
+                ext = codec_map.get(raw_codec, "srt")  # Default to srt if unknown
+
+                subtitle_options.append({
+                    "stream_index": stream.get("Index"),
+                    "source_id": s_id,
+                    "title": stream.get("DisplayTitle", "Subtitle"),
+                    "lang": stream.get("Language", "und"),
+                    "ext": ext
+                })
+                print(f"[{len(subtitle_options)}] {stream.get('DisplayTitle')} (Format: {raw_codec})")
+
+    if not subtitle_options:
+        print("No subtitles found.")
+        return
+
+    choice = input("\nPick a number or type 'all': ").strip().lower()
+
+    if choice == 'all':
+        to_download = subtitle_options
+    elif choice.isdigit() and 1 <= int(choice) <= len(subtitle_options):
+        to_download = [subtitle_options[int(choice) - 1]]
+    else:
+        return
+
+    for sub in to_download:
+        download_url = f"{base}/Videos/{item_id}/{sub['source_id']}/Subtitles/{sub['stream_index']}/Stream.{sub['ext']}"
+        params = {"api_key": api_key}
+
+        print(f"Downloading {sub['title']}...")
+        res = session.get(download_url, params=params)
+
+        if res.status_code == 200:
+            clean_name = f"{movie_or_episode_filename}.{sub['lang']}.{sub['ext']}"
+            with open(os.path.join(output_dir, clean_name), "wb") as f:
+                f.write(res.content)
+            print(f"Saved: {clean_name}")
+        else:
+            print(f"Error {res.status_code}: Server rejected the request for this format.")
+
+
+def process_download_or_stream(base, api_key, items, selected_index, cfg, user_id):
+    from .api import get_media_id, build_stream_url
+    from .download import get_audio_index
 
     target_item = items[selected_index]
-    url = get_stream_url(target_item)
+    item_id, media_source_id = get_media_id(cfg, api_key, base, target_item)
+    stream_url = build_stream_url(base, api_key, item_id, cfg, media_source_id=media_source_id)
+
     print("\nStream URL:")
-    print(url)
-    
-    dl = input("\nDownload? (y/N): ").strip().lower()
-    if dl == "y":
-        count = 1
-        # Only ask for count if it's a series episode (not a movie)
-        if target_item.get("Type") != "Movie" and len(items) > 1 and selected_index < len(items) - 1:
-             print("\nYou can download multiple items in sequence. If you want your choice and the next 2 episodes, enter 3.")
-             count = prompt_int("How many items to download (including this one)? [default 1]: ", default=1)
-        
-        # Get download path from config or prompt
-        default_path = cfg.get("download_path", "")
-        if default_path:
-            out_dir_raw = input(f"Output directory [blank = {default_path}]: ").strip()
-        else:
-            out_dir_raw = input("Output directory (blank = current folder): ").strip()
-        
-        if out_dir_raw:
-            out_dir = Path(out_dir_raw)
-            cfg["download_path"] = out_dir_raw
-            save_config(cfg)
-        elif default_path:
-            out_dir = Path(default_path)
-        else:
-            out_dir = Path(".")
+    print(stream_url)
 
-        for i in range(selected_index, min(len(items), selected_index + count)):
-            item = items[i]
-            stream_url = get_stream_url(item)
-            # For movies, episode_filename might produce weird results if fields missing, but defaults should handle it
-            if item.get("Type") == "Movie":
-                filename = sanitize_filename(item.get("Name") or "Movie") + ".mp4"
+    confirm_download = ""
+    while confirm_download.lower() != "y" and confirm_download.lower() != "n":
+        confirm_download = input("\nDownload? (y/N): ").strip().lower()
+        if confirm_download == "y":
+            count = 1
+            # Only ask for count if it's a series episode (not a movie)
+            if target_item.get("Type") != "Movie" and len(items) > 1 and selected_index < len(items) - 1:
+                 print("\nYou can download multiple items in sequence. If you want your choice and the next 2 episodes, enter 3.")
+                 count = prompt_int("How many items to download (including this one)? [default 1]: ", default=1)
+
+            # Get download path from config or prompt
+            default_path = cfg.get("download_path", "")
+            if default_path:
+                out_dir_raw = input(f"Output directory [blank = {default_path}]: ").strip()
             else:
-                filename = episode_filename(item, ".mp4")
-                
-            output_path = out_dir / filename
+                out_dir_raw = input("Output directory (blank = current folder): ").strip()
 
-            print(f"\nDownloading {filename}")
-            print(f"-> {output_path}")
-            
-            # Check if transcode is needed
-            bitrate = cfg.get("VideoBitrate", 4_000_000)
-            if should_skip_transcode(item, bitrate):
-                # Download original file directly
-                download_direct(base, api_key, item["Id"], output_path)
+            if out_dir_raw:
+                out_dir = Path(out_dir_raw)
+                cfg["download_path"] = out_dir_raw
+                save_config(cfg)
+            elif default_path:
+                out_dir = Path(default_path)
             else:
-                # Download transcoded stream
-                # Calculate estimated size
-                duration_ticks = item.get("RunTimeTicks")
-                estimated_size = 0
-                if duration_ticks and bitrate > 0:
-                    duration_seconds = duration_ticks / 10_000_000
-                    # Total bitrate includes video + audio
-                    audio_bitrate = cfg.get("AudioBitrate", 128_000)
-                    total_bitrate = bitrate + audio_bitrate
-                    # If MaxStreamingBitrate is less, use that
-                    max_streaming_bitrate = cfg.get("MaxStreamingBitrate")
-                    print(f"Configured with VideoBitrate={bitrate}, AudioBitrate={audio_bitrate}, MaxStreamingBitrate={max_streaming_bitrate}")
-                    if max_streaming_bitrate and max_streaming_bitrate < total_bitrate:
-                        total_bitrate = max_streaming_bitrate
-                    estimated_size = (total_bitrate * duration_seconds) / 8  # bits to bytes
-                    print(f"Estimated size: ~{estimated_size / 1e6:.1f} MB (based on {total_bitrate / 1e6:.2f} Mbps and {duration_seconds:.0f} seconds)")
-                
-                download_stream(stream_url, output_path, estimated_size)
+                out_dir = Path(".")
 
-        print("\nDone.")
+            for i in range(selected_index, min(len(items), selected_index + count)):
+                item = items[i]
+                # For movies, episode_filename might produce weird results if fields missing, but defaults should handle it
+                if item.get("Type") == "Movie":
+                    filename = sanitize_filename(item.get("Name") or "Movie") + ".mp4"
+                else:
+                    filename = episode_filename(item, ".mp4")
+
+                if i > 0:
+                    item_id, media_source_id = get_media_id(cfg, api_key, base, item)
+
+                sub_option = ""
+                while sub_option.lower() != "y" and sub_option.lower() != "n":
+                    sub_option = input("\nDownload subtitles? (y/N): ").strip().lower()
+                    if sub_option.lower() == "y":
+                        get_subtitles(base, api_key, user_id, item_id, filename, out_dir)
+                    elif sub_option.lower() == "n":
+                        print("\nSkipping subtitles...")
+                    else:
+                        print("\nPick a valid option.")
+
+                output_path = out_dir / filename
+
+                print(f"\nDownloading {filename}")
+                print(f"-> {output_path}")
+
+                # Check if transcode is needed
+                bitrate = cfg.get("VideoBitrate", 4_000_000)
+                if should_skip_transcode(item, bitrate):
+                    # Download original file directly
+                    download_direct(base, api_key, item["Id"], output_path)
+                else:
+                    audio_index = get_audio_index(base, api_key, item_id)
+                    stream_url = build_stream_url(base, api_key, item_id, cfg, media_source_id=media_source_id, audio_index=audio_index)
+
+                    # Download transcoded stream
+                    # Calculate estimated size
+                    duration_ticks = item.get("RunTimeTicks")
+                    estimated_size = 0
+                    if duration_ticks and bitrate > 0:
+                        duration_seconds = duration_ticks / 10_000_000
+                        # Total bitrate includes video + audio
+                        audio_bitrate = cfg.get("AudioBitrate", 128_000)
+                        total_bitrate = bitrate + audio_bitrate
+                        # If MaxStreamingBitrate is less, use that
+                        max_streaming_bitrate = cfg.get("MaxStreamingBitrate")
+                        print(f"Configured with VideoBitrate={bitrate}, AudioBitrate={audio_bitrate}, MaxStreamingBitrate={max_streaming_bitrate}")
+                        if max_streaming_bitrate and max_streaming_bitrate < total_bitrate:
+                            total_bitrate = max_streaming_bitrate
+                        estimated_size = (total_bitrate * duration_seconds) / 8  # bits to bytes
+                        print(f"Estimated size: ~{estimated_size / 1e6:.1f} MB (based on {total_bitrate / 1e6:.2f} Mbps and {duration_seconds:.0f} seconds)")
+
+                    download_stream(stream_url, output_path, estimated_size)
+            print("\nDone.")
+        elif confirm_download == "n":
+            break
+        else:
+            print("\nPick a valid option.")
     
     input("\nPress Enter to continue...")

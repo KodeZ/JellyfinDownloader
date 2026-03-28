@@ -6,6 +6,48 @@ from pathlib import Path
 
 TIMEOUT = 30
 
+
+def select_audio_track_index(audio_tracks:list)->int:
+    print("\n--- Available Audio Tracks ---")
+    for i, track in enumerate(audio_tracks):
+        print(f"[{i}] Language: {track['language']}")
+
+    while True:
+        try:
+            choice = int(input(f"\nSelect track number (0-{len(audio_tracks) - 1}): "))
+            if 0 <= choice < len(audio_tracks):
+                selected_index = audio_tracks[choice]["index"]
+                print(f"Downloading video with audio language: {audio_tracks[choice]['language']}")
+                return selected_index
+            else:
+                print(f"Please enter a number between 0 and {len(audio_tracks) - 1}.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+
+def get_audio_index(base: str, api_key: str, item_id: str)->int|None:
+    url = f"{base.rstrip('/')}/Items/{item_id}?api_key={api_key}"
+    resp = requests.get(url).json()
+
+    audio_tracks = [
+        {"index": s["Index"], "language": s.get("Language", "und"), "codec": s.get("Codec")}
+        for s in resp.get("MediaSources", [{}])[0].get("MediaStreams", [])
+        if s["Type"] == "Audio"
+    ]
+
+    if not audio_tracks:
+        print("No audio tracks found.")
+        return None
+
+    if len(audio_tracks) > 1:
+        return select_audio_track_index(audio_tracks)
+    else:
+        print(f"There's only one audio track: {audio_tracks[0]['language']}")
+        print(f"Downloading video with audio language: {audio_tracks[0]['language']}")
+        return 0
+
+
+
 def download_stream(stream_url: str, output_path: Path, estimated_size: int = 0):
     """Download stream directly using requests."""
     response = requests.get(stream_url, stream=True, timeout=TIMEOUT)

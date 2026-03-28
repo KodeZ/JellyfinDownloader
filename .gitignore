@@ -143,6 +143,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.idea
 
 # Spyder project settings
 .spyderproject
@@ -207,3 +208,6 @@ marimo/_lsp/
 __marimo__/
 
 jellydown.json
+
+*.mp4
+*.srt

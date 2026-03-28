@@ -34,7 +34,7 @@ def authenticate(base, username, password):
         print(f"Authentication failed: {e}")
         return None
 
-def build_stream_url(base, api_key, item_id, cfg, media_source_id=None):
+def build_stream_url(base, api_key, item_id, cfg, media_source_id=None, audio_index=None):
     """Build stream URL with transcoding parameters."""
     params = {
         "api_key": api_key,
@@ -51,6 +51,8 @@ def build_stream_url(base, api_key, item_id, cfg, media_source_id=None):
     }
     if media_source_id:
         params["MediaSourceId"] = media_source_id
+    if audio_index is not None:
+        params["AudioStreamIndex"] = audio_index
 
     return f"{base.rstrip('/')}/Videos/{item_id}/stream.mp4?{urlencode(params)}"
 
@@ -80,3 +82,20 @@ def list_library_items(base, api_key, user_id, item_type):
         if start_index >= total or not items:
             break
     return all_items
+
+
+"""Process download or streaming for selected item."""
+def get_media_id(cfg, api_key, base, item: dict) -> tuple[str, str]:
+    item_id = item["Id"]
+    ms = item.get("MediaSources") or []
+    media_source_id = None
+    if ms and isinstance(ms, list) and isinstance(ms[0], dict):
+        media_source_id = ms[0].get("Id")
+
+    if not media_source_id:
+        full = jget(base, f"/Items/{item_id}", api_key)
+        ms2 = full.get("MediaSources") or []
+        if ms2 and isinstance(ms2, list) and isinstance(ms2[0], dict):
+            media_source_id = ms2[0].get("Id")
+
+    return item_id, media_source_id
