@@ -14,7 +14,10 @@ def load_config():
         "MaxStreamingBitrate": 4_000_000,
         "AudioBitrate": 128_000,
         "MaxAudioChannels": 2,
-        "SubtitleMethod": "Encode"
+        "SubtitleMethod": "Encode",
+        "PreferredAudioLanguage": "eng",
+        "PreferredSubtitleLanguage": "eng",
+        "ParallelDownloads": 2,
     }
     if CONFIG_FILE.exists():
         try:

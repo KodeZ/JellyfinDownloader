@@ -8,17 +8,19 @@ Transcoding happens server-side just like normal Jellyfin streaming, allowing yo
 
 - **Flexible Download Options**: Download original files or transcode to your preferred quality
 - **Smart Transcoding**: Automatically skips transcoding if the original file is already optimal
-- **Series Support**: Download multiple episodes in sequence
-- **Customizable Settings**: Configure video/audio codecs, bitrates, and channels
+- **Series Support**: Download multiple episodes, in parallel, with one shared language choice
+- **Language-Aware**: Configurable preferred audio/subtitle language with fuzzy matching; confirm or override on every download
+- **Subtitles**: Pick a single language or grab every available subtitle per episode
+- **Customizable Settings**: Configure video/audio codecs, bitrates, channels, and parallel download count
 - **Persistent Configuration**: Remembers your server, credentials, and download preferences
-- **Progress Tracking**: Visual progress indicators for downloads
+- **Progress Tracking**: Multi-line live progress display when downloading episodes in parallel
 
 ## Prerequisites
 
 ### Required Software
 
-1. **Python 3.7+**
-2. **Python packages**: `requests` (automatically installed)
+1. **Python 3.10+**
+2. **Python packages**: `requests`, `rich` (see [requirements.txt](requirements.txt))
 
 ### Installing Python
 
@@ -70,12 +72,12 @@ python3 --version
 ### Installing Python Dependencies
 
 ```bash
-pip install requests
+pip install -r requirements.txt
 ```
 
 Or if you're using Python 3 specifically:
 ```bash
-pip3 install requests
+pip3 install -r requirements.txt
 ```
 
 ## Usage
@@ -128,6 +130,9 @@ Configure transcoding options in the Settings menu:
   - Set to **0** to always download original files without transcoding
 - **Audio Bitrate**: Audio quality setting
 - **Max Audio Channels**: Maximum number of audio channels
+- **Preferred Audio Language**: 3-letter code (e.g. `eng`, `spa`, `fre`). The matching track is pre-selected on every download; you can press Enter to accept or pick a different one. Fuzzy-matches 2-letter codes, names, and regional variants.
+- **Preferred Subtitle Language**: same as above, applied when downloading subtitles
+- **Parallel Downloads**: Number of episodes to download concurrently when batch-downloading a series (default 2)
 
 ### Tips
 
@@ -152,6 +157,9 @@ Settings are stored in `jellydown.json`:
   "AudioBitrate": 128000,
   "MaxAudioChannels": 2,
   "SubtitleMethod": "Encode",
+  "PreferredAudioLanguage": "eng",
+  "PreferredSubtitleLanguage": "eng",
+  "ParallelDownloads": 2,
   "server_url": "http://your-server:8096",
   "api_key": "your-api-key",
   "download_path": "/path/to/downloads"
