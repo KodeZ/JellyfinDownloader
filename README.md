@@ -1,155 +1,185 @@
 # JellyfinDownloader
 
-A Python script for downloading movies and TV series from your Jellyfin media server. Downloads streams directly from Jellyfin with server-side transcoding, or download original files without any transcoding.
+A Python tool for downloading movies and TV series from your Jellyfin server. Streams directly with server-side transcoding (so it benefits from any hardware acceleration on the server) or grabs the original file untouched. Downloads typically run 10–20× faster than real time.
 
-Transcoding happens server-side just like normal Jellyfin streaming, allowing you to take advantage of your server's hardware acceleration capabilities. Downloads typically run 10-20x faster than real-time, making it quick and efficient.
+The default UI is a Textual-based TUI with a Midnight-Commander-style library tree on the left and a live downloads pane on the right. The legacy text-menu CLI is still available under `--classic`.
 
 ## Features
 
-- **Flexible Download Options**: Download original files or transcode to your preferred quality
-- **Smart Transcoding**: Automatically skips transcoding if the original file is already optimal
-- **Series Support**: Download multiple episodes, in parallel, with one shared language choice
-- **Language-Aware**: Configurable preferred audio/subtitle language with fuzzy matching; confirm or override on every download
-- **Subtitles**: Pick a single language or grab every available subtitle per episode
-- **Customizable Settings**: Configure video/audio codecs, bitrates, channels, and parallel download count
-- **Persistent Configuration**: Remembers your server, credentials, and download preferences
-- **Progress Tracking**: Multi-line live progress display when downloading episodes in parallel
+- **TUI by default** — tree navigation, multi-select, modal download dialog, live download progress in a side pane.
+- **Background download manager** — multiple downloads run in parallel; each can be cancelled or removed independently.
+- **Server-side transcoding or original files** — set Video Bitrate to 0 to always download originals, or let the tool skip transcoding when the original is already smaller than the transcoded result would be.
+- **Per-item language tracks** — when you trigger a download, the audio and subtitle pickers are populated from the actual tracks on that file (or the union of tracks across a batch), via the Jellyfin API.
+- **Series batch downloads** — mark multiple episodes with `space`, hit `d`, pick shared language settings once, and the tool queues them all.
+- **In-tree settings** — settings live as a branch in the library tree; press Enter on a leaf to edit, Enter to save, Esc to cancel.
+- **Persistent configuration** — server URL, credentials, language preferences, and last-used download path are remembered in `jellydown.json`.
+- **Classic CLI fallback** — `python jellydown.py --classic` for the original text-menu workflow (useful for scripting).
 
 ## Prerequisites
 
-### Required Software
-
-1. **Python 3.10+**
-2. **Python packages**: `requests`, `rich` (see [requirements.txt](requirements.txt))
+- **Python 3.10+**
+- Python packages: `requests`, `rich`, `textual` (see [requirements.txt](requirements.txt))
 
 ### Installing Python
 
 #### Windows
 
-**Option 1: Using winget (Recommended)**
 ```powershell
 winget install Python.Python.3.12
 ```
 
-**Option 2: Microsoft Store**
-1. Open the Microsoft Store app
-2. Search for "Python 3.12" (or latest version)
-3. Click "Get" or "Install"
+Or via the Microsoft Store, or the [official installer](https://www.python.org/downloads/) (tick "Add Python to PATH").
 
-**Option 3: Official Installer**
-1. Download from [python.org](https://www.python.org/downloads/)
-2. Run the installer
-3. **Important**: Check "Add Python to PATH" during installation
-
-**Verify installation:**
 ```powershell
 python --version
 ```
 
 #### Linux
 
-**Debian/Ubuntu:**
+Debian/Ubuntu:
 ```bash
-sudo apt update
-sudo apt install python3 python3-pip
+sudo apt update && sudo apt install python3 python3-pip
 ```
 
-**Fedora:**
+Fedora:
 ```bash
 sudo dnf install python3 python3-pip
 ```
 
-**Arch Linux:**
+Arch:
 ```bash
 sudo pacman -S python python-pip
 ```
 
-**Verify installation:**
 ```bash
 python3 --version
 ```
 
-### Installing Python Dependencies
+### Installing dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Or if you're using Python 3 specifically:
+A virtual environment is recommended:
+
 ```bash
-pip3 install -r requirements.txt
+python -m venv myenv
+# Windows: myenv\Scripts\activate
+# Linux:   source myenv/bin/activate
+pip install -r requirements.txt
 ```
 
 ## Usage
 
-### First Run
+### First run
 
-1. Run the script:
-   ```bash
-   python jellydown.py
-   ```
-   Or on Linux:
-   ```bash
-   python3 jellydown.py
-   ```
-
-2. Enter your Jellyfin server URL (e.g., `http://192.168.1.100:8096`)
-
-3. Choose authentication method:
-   - **Username/Password** (recommended): Generates an access token
-   - **API Key**: Use an existing API key from Jellyfin
-
-4. The script will save your configuration to `jellydown.json`
-
-### Main Menu
-
-```
-1. Series    - Browse and download TV series
-2. Movies    - Browse and download movies
-3. Settings  - Configure transcoding options
-q. Quit
+```bash
+python jellydown.py
 ```
 
-### Downloading Content
+You'll be prompted (in a regular terminal prompt, before the TUI starts) for:
 
-1. Select **Series** or **Movies**
-2. Browse through the available content (use `n`/`p` for pagination)
-3. Select an item by entering its number
-4. Review the stream URL
-5. Type `y` to download
-6. For series: Choose how many episodes to download in sequence
-7. Specify output directory (or press Enter to use the saved path)
+1. **Server URL**, e.g. `http://192.168.1.100:8096`. If you omit the port the tool offers to add `8096`.
+2. **Authentication** — username/password (a token is generated and saved) or an existing API key from your Jellyfin Dashboard.
 
-### Settings
+Once authenticated, the TUI launches. Settings, server URL, and the auth token are persisted to `jellydown.json` next to the script.
 
-Configure transcoding options in the Settings menu:
+### TUI layout
 
-- **Video Codec**: H.264 (compatible) or H.265 (efficient, requires hardware support)
-- **Audio Codec**: AAC (recommended), MP3, AC3, or OPUS
-- **Video Bitrate**: Set quality (higher = better quality, larger files)
-  - Set to **0** to always download original files without transcoding
-- **Audio Bitrate**: Audio quality setting
-- **Max Audio Channels**: Maximum number of audio channels
-- **Preferred Audio Language**: 3-letter code (e.g. `eng`, `spa`, `fre`). The matching track is pre-selected on every download; you can press Enter to accept or pick a different one. Fuzzy-matches 2-letter codes, names, and regional variants.
-- **Preferred Subtitle Language**: same as above, applied when downloading subtitles
-- **Parallel Downloads**: Number of episodes to download concurrently when batch-downloading a series (default 2)
+```
+┌───────────── Library ──────────────┐┌──── Downloads ────┐
+│ ▼ Library                          ││ File  Status  …   │
+│   ▶ Series                         ││                   │
+│   ▼ Movies                         ││                   │
+│       Arrival                      ││                   │
+│   ▶ Settings                       ││                   │
+└────────────────────────────────────┘└───────────────────┘
+ ← Collapse  → Expand  space Mark  d Download  c Cancel  r Remove  s Settings  ? Help  q Quit
+```
 
-### Tips
+### Library tree (left pane)
 
-- **Original Files**: Set Video Bitrate to `0` in Settings to always download original files
-- **Batch Downloads**: When downloading series, you can specify how many consecutive episodes to download
-- **Quality Presets**: 
-  - 4 Mbps (default): Good quality for 1080p content
-  - 8-15 Mbps: High quality for 1080p
-  - 20+ Mbps: Very high quality or 4K content
-- **Storage**: The script automatically skips transcoding if your original file is already smaller than the transcoded version would be
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` | Move cursor |
+| `→` | Expand the focused branch, or descend to its first child |
+| `←` | Collapse the focused branch, or ascend to its parent |
+| `PageUp/Down` | Page through long lists |
+| `space` | Toggle a mark on the focused movie/episode (shown as `[*]`) |
+| `Enter` | Download the focused item (opens the modal). On a setting leaf, edit it. |
+| `d` | Download all marked items, or the focused item if nothing is marked |
 
-## Configuration File
+Tree branches are loaded lazily — series→seasons→episodes are fetched on first expand.
 
-Settings are stored in `jellydown.json`:
+### Downloads pane (right pane)
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` | Focus a row |
+| `c` | Cancel the focused download |
+| `r` | Remove a finished/cancelled row |
+
+### Download dialog
+
+Triggered by Enter or `d`. Output directory, audio language, and subtitle choice are pre-filled from your config and from the actual tracks on the selected item(s).
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` | Move between fields (output dir → audio → subtitle → Cancel → Download, with wrap) |
+| `Enter` | Activate the focused field — opens a Select dropdown, or submits the form on the Download button |
+| `d` | Start the download |
+| `c` / `Esc` | Cancel the dialog |
+| `a` | Jump to the audio field |
+| `s` | Jump to the subtitle field |
+
+The audio and subtitle dropdowns list the language codes actually present on the selected items (union across a batch). Subtitle has **None** and **All** at the top in addition to the per-language options.
+
+### Settings (in the tree)
+
+Open with `s` or by expanding the **Settings** branch. Each setting is a leaf showing `Field: current value`.
+
+| Key | Action |
+| --- | --- |
+| Enter | Begin editing — an edit bar appears at the bottom of the screen, prefilled with the current value |
+| Enter (in the edit bar) | Save the new value |
+| Esc | Cancel the edit without saving |
+
+Editable fields:
+
+- **Video codec** — `h264` (compatible) or `hevc` (efficient, needs hardware support)
+- **Audio codec** — `aac`, `mp3`, `ac3`, `opus`
+- **Video bitrate** — bits/sec; `0` means "always download original, no transcoding"
+- **Audio bitrate** — bits/sec
+- **Max audio channels**
+- **Preferred audio language** — 3-letter code; pre-selects the matching track in the download dialog
+- **Preferred subtitle language** — same, for subtitles
+- **Parallel downloads** — number of items downloaded concurrently (1–16)
+
+Editing **Video bitrate** also updates `MaxStreamingBitrate` to the same value.
+
+### Help
+
+`?` opens an in-app keybindings reference. `q` quits.
+
+### Classic CLI (legacy)
+
+The pre-TUI text-menu interface is still available for scripting or low-feature terminals:
+
+```bash
+python jellydown.py --classic
+```
+
+The classic flow is the original numeric-menu walkthrough: pick Series/Movies, paginate (`n`/`p`), pick by number, choose subtitles, optionally pick how many consecutive episodes to grab.
+
+## Configuration file
+
+Settings are stored in `jellydown.json` next to the script:
 
 ```json
 {
+  "server_url": "http://your-server:8096",
+  "api_key": "your-token",
   "VideoCodec": "h264",
   "AudioCodec": "aac",
   "VideoBitrate": 4000000,
@@ -160,27 +190,49 @@ Settings are stored in `jellydown.json`:
   "PreferredAudioLanguage": "eng",
   "PreferredSubtitleLanguage": "eng",
   "ParallelDownloads": 2,
-  "server_url": "http://your-server:8096",
-  "api_key": "your-api-key",
   "download_path": "/path/to/downloads"
 }
 ```
 
+The file is gitignored by default (it contains an access token).
+
+### Redirecting the config path
+
+Set `JELLYDOWN_CONFIG_FILE` to point reads and writes at a different file. Useful for tests, scripting against multiple servers, or development:
+
+```bash
+JELLYDOWN_CONFIG_FILE=/tmp/jellydown-test.json python jellydown.py
+```
+
+## Tips
+
+- **Always-original downloads**: set Video Bitrate to `0` in Settings.
+- **Quality presets** (Mbps): 4 = decent 1080p, 8–15 = high-quality 1080p, 20+ = high-quality 4K.
+- **Skip-transcode rule**: if the original file is already smaller (within 5%) than the transcoded result would be, the original is downloaded directly. Logged when it happens.
+- **Cancellable downloads**: hit `c` on the focused download row at any time. The partially-written file is removed.
+
 ## Troubleshooting
 
 ### "Authentication failed"
-- Verify your username and password
-- Check that your Jellyfin server is accessible
-- Try using an API key instead (generate one in Jellyfin Dashboard → API Keys)
 
-### Downloads are slow
-- You're downloading from your Jellyfin server - speed depends on your network
-- Transcoding (when enabled) is CPU-intensive on the server side
-- Consider downloading original files (set bitrate to 0) if server performance is an issue
+- Double-check username/password.
+- Confirm the server URL is reachable from this machine.
+- Try an API key (Jellyfin Dashboard → API Keys) instead of username/password.
 
-### Last resort - remove the configuration file
-- Delete `jellydown.json` to reset all settings and reconfigure
+### Slow downloads
+
+- Speed depends on your link to the server.
+- Server-side transcoding is CPU-intensive — try Video Bitrate `0` to skip transcoding.
+
+### TUI looks broken
+
+- The download dialog needs ~70 columns. If your terminal is narrower, widen it.
+- Set the `TERM` env var to a sensible value (e.g. `xterm-256color`) if colors are wrong.
+
+### Reset configuration
+
+Delete `jellydown.json` (or whatever `JELLYDOWN_CONFIG_FILE` points to). On next launch you'll be re-prompted for everything.
 
 ## License
 
-See [LICENSE](LICENSE) file for details.
+See [LICENSE](LICENSE).

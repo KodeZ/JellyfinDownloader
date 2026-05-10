@@ -213,3 +213,7 @@ jellydown.json
 *.srt
 
 myenv
+
+# Debug artifacts from TUI rendering / layout investigation
+modal_*.txt
+*.snapshot.svg
