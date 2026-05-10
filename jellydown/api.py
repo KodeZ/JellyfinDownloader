@@ -1,7 +1,10 @@
 """Jellyfin API interactions."""
 
+import logging
 import requests
 from urllib.parse import urlencode
+
+log = logging.getLogger(__name__)
 
 TIMEOUT = 30
 
@@ -31,7 +34,7 @@ def authenticate(base, username, password):
         data = resp.json()
         return data.get("AccessToken")
     except Exception as e:
-        print(f"Authentication failed: {e}")
+        log.error("Authentication failed: %s", e)
         return None
 
 def build_stream_url(base, api_key, item_id, cfg, media_source_id=None, audio_index=None):

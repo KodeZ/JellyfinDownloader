@@ -2,12 +2,20 @@
 
 import os
 import time
+import logging
+import threading
 import requests
 from pathlib import Path
 
 from .utils import lang_matches, normalize_lang
 
+log = logging.getLogger(__name__)
+
 TIMEOUT = 30
+
+
+class DownloadCancelled(Exception):
+    """Raised inside a download loop when its cancel_event has been set."""
 
 SUBTITLE_CODEC_EXT = {
     "subrip": "srt",
@@ -34,7 +42,7 @@ def fetch_subtitle_tracks(base: str, api_key: str, user_id: str, item_id: str) -
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        print(f"Failed to reach PlaybackInfo: {e}")
+        log.error("Failed to reach PlaybackInfo: %s", e)
         return []
 
     tracks = []
@@ -72,15 +80,15 @@ def download_subtitle(base: str, api_key: str, item_id: str, sub: dict,
     try:
         res = requests.get(url, params={"api_key": api_key}, timeout=TIMEOUT)
     except Exception as e:
-        print(f"Subtitle download failed: {e}")
+        log.error("Subtitle download failed: %s", e)
         return False
     if res.status_code != 200:
-        print(f"Subtitle error {res.status_code} for {sub['title']}.")
+        log.error("Subtitle error %s for %s.", res.status_code, sub['title'])
         return False
     clean_name = f"{base_filename}.{sub['lang']}.{sub['ext']}"
     with open(os.path.join(out_dir, clean_name), "wb") as f:
         f.write(res.content)
-    print(f"Saved subtitle: {clean_name}")
+    log.info("Saved subtitle: %s", clean_name)
     return True
 
 
@@ -159,7 +167,7 @@ def get_audio_index(base: str, api_key: str, item_id: str, preferred_lang: str =
     """Interactive audio track selection for a single item."""
     tracks = fetch_audio_tracks(base, api_key, item_id)
     if not tracks:
-        print("No audio tracks found.")
+        log.warning("No audio tracks found.")
         return None
     chosen = select_track(tracks, preferred_lang, kind="audio")
     return chosen["index"] if chosen else None
@@ -181,11 +189,18 @@ def resolve_audio_index(base: str, api_key: str, item_id: str, preferred_lang: s
 
 
 def _stream_to_file(response, output_path: Path, estimated_size: int = 0,
-                    progress=None, task_id=None):
+                    progress=None, task_id=None,
+                    cancel_event: threading.Event | None = None,
+                    progress_cb=None):
     """Write a streaming HTTP response to disk with progress reporting.
 
-    If `progress` and `task_id` are provided, updates that rich progress task
-    instead of printing. Otherwise falls back to single-line stdout updates.
+    Reporting precedence (first match wins):
+      - `progress_cb(downloaded, total, speed)` — generic callback for any UI.
+      - `progress` + `task_id` — rich.progress task to update.
+      - stdout fallback — single-line CR-overwrite updates.
+
+    If `cancel_event` is set during the download, raises DownloadCancelled.
+    The partially-written file is not deleted; callers decide cleanup policy.
     """
     total_size = int(response.headers.get("content-length", 0))
     if not total_size and estimated_size:
@@ -198,10 +213,23 @@ def _stream_to_file(response, output_path: Path, estimated_size: int = 0,
     last_update = start_time
     with open(output_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=64 * 1024):
+            if cancel_event is not None and cancel_event.is_set():
+                raise DownloadCancelled()
             if not chunk:
                 continue
             f.write(chunk)
             downloaded += len(chunk)
+
+            if progress_cb is not None:
+                now = time.time()
+                if now - last_update < 0.25 and downloaded < (total_size or downloaded + 1):
+                    continue
+                elapsed = now - start_time
+                speed = downloaded / elapsed if elapsed > 0 else 0
+                progress_cb(downloaded, total_size, speed)
+                last_update = now
+                continue
+
             if progress is not None and task_id is not None:
                 progress.update(task_id, completed=downloaded)
                 continue
@@ -227,7 +255,11 @@ def _stream_to_file(response, output_path: Path, estimated_size: int = 0,
                 )
             last_update = now
 
-    if progress is None or task_id is None:
+    if progress_cb is not None:
+        elapsed = time.time() - start_time
+        speed = downloaded / elapsed if elapsed > 0 else 0
+        progress_cb(downloaded, total_size or downloaded, speed)
+    elif progress is None or task_id is None:
         elapsed = time.time() - start_time
         speed = downloaded / elapsed if elapsed > 0 else 0
         print(f"\nCompleted: {downloaded / 1e6:.1f} MB in {elapsed:.1f}s (avg: {speed / 1e6:.1f} MB/s)")
@@ -235,22 +267,28 @@ def _stream_to_file(response, output_path: Path, estimated_size: int = 0,
 
 
 def download_stream(stream_url: str, output_path: Path, estimated_size: int = 0,
-                    progress=None, task_id=None):
+                    progress=None, task_id=None,
+                    cancel_event: threading.Event | None = None,
+                    progress_cb=None):
     """Download a transcoded stream URL to disk."""
     response = requests.get(stream_url, stream=True, timeout=TIMEOUT)
     response.raise_for_status()
-    return _stream_to_file(response, output_path, estimated_size, progress, task_id)
+    return _stream_to_file(response, output_path, estimated_size,
+                           progress, task_id, cancel_event, progress_cb)
 
 
 def download_direct(base: str, api_key: str, item_id: str, output_path: Path,
-                    progress=None, task_id=None):
+                    progress=None, task_id=None,
+                    cancel_event: threading.Event | None = None,
+                    progress_cb=None):
     """Download the original file directly without transcoding."""
     url = f"{base.rstrip('/')}/Items/{item_id}/Download?api_key={api_key}"
-    if progress is None:
-        print("Downloading original file (no transcoding)...")
+    if progress is None and progress_cb is None:
+        log.info("Downloading original file (no transcoding)...")
     response = requests.get(url, stream=True, timeout=TIMEOUT)
     response.raise_for_status()
-    return _stream_to_file(response, output_path, 0, progress, task_id)
+    return _stream_to_file(response, output_path, 0,
+                           progress, task_id, cancel_event, progress_cb)
 
 def estimate_transcode_size(item: dict, cfg: dict) -> int:
     """Estimate transcoded output size in bytes from item duration and config bitrates."""
@@ -268,7 +306,9 @@ def estimate_transcode_size(item: dict, cfg: dict) -> int:
 
 
 def download_episode_job(job: dict, base: str, api_key: str, user_id: str,
-                         cfg: dict, progress=None) -> dict:
+                         cfg: dict, progress=None,
+                         cancel_event: threading.Event | None = None,
+                         progress_cb=None) -> dict:
     """Worker that downloads one episode's video and subtitles.
 
     `job` keys: item, filename, output_path, audio_lang, sub_choice.
@@ -293,31 +333,42 @@ def download_episode_job(job: dict, base: str, api_key: str, user_id: str,
 
         if should_skip_transcode(item, bitrate):
             download_direct(base, api_key, item["Id"], output_path,
-                            progress=progress, task_id=task_id)
+                            progress=progress, task_id=task_id,
+                            cancel_event=cancel_event, progress_cb=progress_cb)
         else:
             audio_index, audio_label = resolve_audio_index(base, api_key, item_id, audio_lang)
-            if progress is None:
+            if progress is None and progress_cb is None:
                 if audio_label and lang_matches(audio_label, audio_lang):
-                    print(f"Audio: {audio_label}")
+                    log.info("Audio: %s", audio_label)
                 else:
-                    print(f"Audio: {audio_label or 'first track'} (preferred '{audio_lang}' not available)")
+                    log.info("Audio: %s (preferred '%s' not available)",
+                             audio_label or "first track", audio_lang)
             stream_url = build_stream_url(
                 base, api_key, item_id, cfg,
                 media_source_id=media_source_id, audio_index=audio_index,
             )
             download_stream(stream_url, output_path,
                             estimate_transcode_size(item, cfg),
-                            progress=progress, task_id=task_id)
+                            progress=progress, task_id=task_id,
+                            cancel_event=cancel_event, progress_cb=progress_cb)
 
         if sub_choice and sub_choice != "none":
             sub_tracks = fetch_subtitle_tracks(base, api_key, user_id, item_id)
             wanted = filter_subs_by_choice(sub_tracks, sub_choice)
             if not wanted and sub_choice != "all":
-                print(f"No subtitle matching '{sub_choice}' for {filename}.")
+                log.warning("No subtitle matching '%s' for %s.", sub_choice, filename)
             for sub in wanted:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise DownloadCancelled()
                 download_subtitle(base, api_key, item_id, sub, filename, output_path.parent)
 
         return {"filename": filename, "ok": True}
+    except DownloadCancelled:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {"filename": filename, "ok": False, "cancelled": True, "error": "cancelled"}
     except Exception as e:
         return {"filename": filename, "ok": False, "error": str(e)}
     finally:
@@ -329,16 +380,21 @@ def download_episodes_parallel(jobs: list[dict], base: str, api_key: str,
                                user_id: str, cfg: dict) -> list[dict]:
     """Download episode jobs concurrently with a multi-line rich progress display.
 
-    `jobs` is the list produced by the series batch flow. Returns per-job results.
+    Thin adapter over DownloadManager: submits all jobs and renders progress
+    via a subscriber that updates rich.Progress. Returns per-job results in
+    the same shape the previous implementation produced.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     from rich.progress import (
         Progress, TextColumn, BarColumn, DownloadColumn,
         TransferSpeedColumn, TimeRemainingColumn, TaskProgressColumn,
     )
+    from .download_manager import (
+        DownloadManager, EV_ADDED, EV_PROGRESS, EV_STATE,
+        DONE, FAILED, CANCELLED,
+    )
 
     workers = max(1, int(cfg.get("ParallelDownloads", 2)))
-    print(f"\nStarting {len(jobs)} downloads, {workers} in parallel...")
+    log.info("Starting %d downloads, %d in parallel...", len(jobs), workers)
 
     columns = [
         TextColumn("[bold blue]{task.description}", justify="left"),
@@ -349,26 +405,69 @@ def download_episodes_parallel(jobs: list[dict], base: str, api_key: str,
         TimeRemainingColumn(),
     ]
 
-    results = []
+    job_to_task: dict[str, int] = {}
+    completed_lock = threading.Lock()
+    completed_count = [0]
+
     with Progress(*columns, transient=False) as progress:
         overall = progress.add_task(
             f"[green]Total ({len(jobs)} episodes)", total=len(jobs)
         )
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [
-                ex.submit(download_episode_job, job, base, api_key, user_id, cfg, progress)
-                for job in jobs
-            ]
-            for fut in as_completed(futures):
-                res = fut.result()
-                results.append(res)
-                progress.update(overall, advance=1)
-                if res.get("ok"):
-                    progress.console.print(f"[green]Done:[/green] {res['filename']}")
+
+        def on_event(ev, job):
+            if ev == EV_ADDED:
+                tid = progress.add_task(job.filename, total=1, start=True)
+                job_to_task[job.id] = tid
+            elif ev == EV_PROGRESS:
+                tid = job_to_task.get(job.id)
+                if tid is not None:
+                    progress.update(
+                        tid,
+                        completed=job.downloaded,
+                        total=job.total or job.downloaded or 1,
+                    )
+            elif ev == EV_STATE and job.status in (DONE, FAILED, CANCELLED):
+                tid = job_to_task.get(job.id)
+                if tid is not None:
+                    progress.update(tid, visible=False)
+                with completed_lock:
+                    completed_count[0] += 1
+                    progress.update(overall, completed=completed_count[0])
+                if job.status == DONE:
+                    progress.console.print(f"[green]Done:[/green] {job.filename}")
+                elif job.status == CANCELLED:
+                    progress.console.print(f"[yellow]Cancelled:[/yellow] {job.filename}")
                 else:
                     progress.console.print(
-                        f"[red]Failed:[/red] {res['filename']} ({res.get('error')})"
+                        f"[red]Failed:[/red] {job.filename} ({job.error})"
                     )
+
+        manager = DownloadManager(base, api_key, user_id, cfg, workers=workers)
+        manager.subscribe(on_event)
+        submitted = [manager.submit(spec) for spec in jobs]
+        try:
+            manager.wait_all()
+        except KeyboardInterrupt:
+            progress.console.print("[yellow]Cancelling all downloads...[/yellow]")
+            manager.cancel_all()
+            manager.wait_all()
+            raise
+        finally:
+            manager.shutdown(wait=True)
+
+    results: list[dict] = []
+    for j in submitted:
+        if j.status == DONE:
+            results.append({"filename": j.filename, "ok": True})
+        elif j.status == CANCELLED:
+            results.append({
+                "filename": j.filename, "ok": False,
+                "cancelled": True, "error": "cancelled",
+            })
+        else:
+            results.append({
+                "filename": j.filename, "ok": False, "error": j.error,
+            })
     return results
 
 
@@ -381,7 +480,7 @@ def should_skip_transcode(item: dict, bitrate: int) -> bool:
     """
     # If bitrate is 0, always download original
     if bitrate == 0:
-        print("Bitrate set to 0 - downloading original file.")
+        log.info("Bitrate set to 0 - downloading original file.")
         return True
     
     duration_ticks = item.get("RunTimeTicks")
@@ -403,8 +502,8 @@ def should_skip_transcode(item: dict, bitrate: int) -> bool:
     
     # If original is within 5% of expected, skip transcode
     if original_size <= expected_size * 1.05:
-        print(f"Original size ({original_size / 1e6:.1f} MB) is already optimal.")
-        print(f"Skipping transcode (would be ~{expected_size / 1e6:.1f} MB).")
+        log.info("Original size (%.1f MB) is already optimal; skipping transcode (would be ~%.1f MB).",
+                 original_size / 1e6, expected_size / 1e6)
         return True
     
     return False

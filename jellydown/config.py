@@ -1,9 +1,24 @@
 """Configuration management for JellyfinDownloader."""
 
 import json
+import os
 from pathlib import Path
 
-CONFIG_FILE = Path(__file__).parent.parent / "jellydown.json"
+DEFAULT_CONFIG_FILE = Path(__file__).parent.parent / "jellydown.json"
+
+
+def config_path() -> Path:
+    """Resolve the config file path.
+
+    Honors the JELLYDOWN_CONFIG_FILE env var so test scripts (and other
+    embedders) can redirect writes away from the user's real config. This
+    is checked on every call so tests can set the env var after import.
+    """
+    override = os.environ.get("JELLYDOWN_CONFIG_FILE")
+    if override:
+        return Path(override)
+    return DEFAULT_CONFIG_FILE
+
 
 def load_config():
     """Load configuration from file with defaults."""
@@ -19,9 +34,10 @@ def load_config():
         "PreferredSubtitleLanguage": "eng",
         "ParallelDownloads": 2,
     }
-    if CONFIG_FILE.exists():
+    path = config_path()
+    if path.exists():
         try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 defaults.update(data)
                 return defaults
@@ -29,9 +45,10 @@ def load_config():
             pass
     return defaults
 
+
 def save_config(cfg: dict):
     """Save configuration to file."""
-    CONFIG_FILE.write_text(
+    config_path().write_text(
         json.dumps(cfg, indent=2),
-        encoding="utf-8"
+        encoding="utf-8",
     )
