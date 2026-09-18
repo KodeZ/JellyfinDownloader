@@ -52,6 +52,20 @@ def authentication_flow(base):
     return api_key
 
 
+def logout(cfg):
+    """Forget the stored access token so the next run re-authenticates.
+
+    Only clears the local copy; the token stays valid on the server until it
+    is revoked from Dashboard -> Devices.
+    """
+    if cfg.get("api_key"):
+        cfg["api_key"] = ""
+        save_config(cfg)
+        print("Logged out: stored access token removed.")
+    else:
+        print("No stored access token to remove.")
+
+
 def determine_user_id(base, api_key):
     try:
         me = jget(base, "/Users/Me", api_key)
@@ -134,10 +148,16 @@ def main():
         "--classic", action="store_true",
         help="Use the legacy text-menu CLI instead of the TUI.",
     )
+    parser.add_argument(
+        "--logout", action="store_true",
+        help="Forget the stored access token and ask for credentials again.",
+    )
     args = parser.parse_args()
 
     _configure_logging()
     cfg = load_config()
+    if args.logout:
+        logout(cfg)
     base, api_key, user_id, _me = _resolve_server_and_auth(cfg)
 
     if args.classic:

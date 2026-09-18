@@ -8,12 +8,28 @@ log = logging.getLogger(__name__)
 
 TIMEOUT = 30
 
+CLIENT_INFO = (
+    'MediaBrowser Client="JellyfinDownloader", Device="JellyfinDownloader", '
+    'DeviceId="JellyfinDownloader", Version="1.0.0"'
+)
+
+
+def auth_headers(api_key):
+    """Auth headers for an authenticated Jellyfin request.
+
+    Jellyfin dropped both the `?api_key=` query parameter and the
+    `X-Emby-Token` / `X-Emby-Authorization` headers; the token now has to
+    travel in the standard Authorization header. Every authenticated request
+    in this package goes through here.
+    """
+    return {"Authorization": f'MediaBrowser Token="{api_key}"'}
+
+
 def jget(base, path, api_key, params=None):
     """Make GET request to Jellyfin API."""
     params = dict(params or {})
-    params["api_key"] = api_key
     url = base.rstrip("/") + path
-    r = requests.get(url, params=params, timeout=TIMEOUT)
+    r = requests.get(url, params=params, headers=auth_headers(api_key), timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
@@ -22,7 +38,7 @@ def authenticate(base, username, password):
     url = base.rstrip("/") + "/Users/AuthenticateByName"
     headers = {
         "Content-Type": "application/json",
-        "X-Emby-Authorization": 'MediaBrowser Client="JellyfinDownloader", Device="JellyfinDownloader", DeviceId="JellyfinDownloader", Version="1.0.0"'
+        "Authorization": CLIENT_INFO,
     }
     payload = {
         "Username": username,
@@ -38,9 +54,13 @@ def authenticate(base, username, password):
         return None
 
 def build_stream_url(base, api_key, item_id, cfg, media_source_id=None, audio_index=None):
-    """Build stream URL with transcoding parameters."""
+    """Build stream URL with transcoding parameters.
+
+    The token is not embedded in the URL; callers authenticate the request
+    with `auth_headers(api_key)`. `api_key` is kept in the signature so call
+    sites stay unchanged.
+    """
     params = {
-        "api_key": api_key,
         "container": "mp4",
         "VideoCodec": cfg.get("VideoCodec", "h264"),
         "AudioCodec": cfg.get("AudioCodec", "aac"),
