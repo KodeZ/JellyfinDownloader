@@ -7,6 +7,7 @@ import threading
 import requests
 from pathlib import Path
 
+from .api import auth_headers
 from .utils import lang_matches, normalize_lang
 
 log = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ SUBTITLE_CODEC_EXT = {
 def fetch_subtitle_tracks(base: str, api_key: str, user_id: str, item_id: str) -> list[dict]:
     """Return subtitle track metadata for a Jellyfin item via PlaybackInfo."""
     session = requests.Session()
-    session.headers.update({"X-Emby-Token": api_key})
+    session.headers.update(auth_headers(api_key))
     try:
         resp = session.post(
             f"{base.rstrip('/')}/Items/{item_id}/PlaybackInfo",
@@ -78,7 +79,7 @@ def download_subtitle(base: str, api_key: str, item_id: str, sub: dict,
         f"/Subtitles/{sub['stream_index']}/Stream.{sub['ext']}"
     )
     try:
-        res = requests.get(url, params={"api_key": api_key}, timeout=TIMEOUT)
+        res = requests.get(url, headers=auth_headers(api_key), timeout=TIMEOUT)
     except Exception as e:
         log.error("Subtitle download failed: %s", e)
         return False
@@ -107,8 +108,8 @@ def filter_subs_by_choice(tracks: list[dict], choice) -> list[dict]:
 
 def fetch_audio_tracks(base: str, api_key: str, item_id: str) -> list[dict]:
     """Return audio track metadata for a Jellyfin item."""
-    url = f"{base.rstrip('/')}/Items/{item_id}?api_key={api_key}"
-    resp = requests.get(url, timeout=TIMEOUT).json()
+    url = f"{base.rstrip('/')}/Items/{item_id}"
+    resp = requests.get(url, headers=auth_headers(api_key), timeout=TIMEOUT).json()
     return [
         {
             "index": s["Index"],
@@ -269,9 +270,14 @@ def _stream_to_file(response, output_path: Path, estimated_size: int = 0,
 def download_stream(stream_url: str, output_path: Path, estimated_size: int = 0,
                     progress=None, task_id=None,
                     cancel_event: threading.Event | None = None,
-                    progress_cb=None):
-    """Download a transcoded stream URL to disk."""
-    response = requests.get(stream_url, stream=True, timeout=TIMEOUT)
+                    progress_cb=None, api_key: str | None = None):
+    """Download a transcoded stream URL to disk.
+
+    `api_key` authenticates the request; the token is no longer carried in
+    the stream URL itself.
+    """
+    headers = auth_headers(api_key) if api_key else None
+    response = requests.get(stream_url, stream=True, headers=headers, timeout=TIMEOUT)
     response.raise_for_status()
     return _stream_to_file(response, output_path, estimated_size,
                            progress, task_id, cancel_event, progress_cb)
@@ -282,10 +288,10 @@ def download_direct(base: str, api_key: str, item_id: str, output_path: Path,
                     cancel_event: threading.Event | None = None,
                     progress_cb=None):
     """Download the original file directly without transcoding."""
-    url = f"{base.rstrip('/')}/Items/{item_id}/Download?api_key={api_key}"
+    url = f"{base.rstrip('/')}/Items/{item_id}/Download"
     if progress is None and progress_cb is None:
         log.info("Downloading original file (no transcoding)...")
-    response = requests.get(url, stream=True, timeout=TIMEOUT)
+    response = requests.get(url, stream=True, headers=auth_headers(api_key), timeout=TIMEOUT)
     response.raise_for_status()
     return _stream_to_file(response, output_path, 0,
                            progress, task_id, cancel_event, progress_cb)
@@ -350,7 +356,8 @@ def download_episode_job(job: dict, base: str, api_key: str, user_id: str,
             download_stream(stream_url, output_path,
                             estimate_transcode_size(item, cfg),
                             progress=progress, task_id=task_id,
-                            cancel_event=cancel_event, progress_cb=progress_cb)
+                            cancel_event=cancel_event, progress_cb=progress_cb,
+                            api_key=api_key)
 
         if sub_choice and sub_choice != "none":
             sub_tracks = fetch_subtitle_tracks(base, api_key, user_id, item_id)

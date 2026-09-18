@@ -239,7 +239,7 @@ def download_single_item(base, api_key, user_id, item, cfg, out_dir):
         estimated_size = estimate_transcode_size(item, cfg)
         if estimated_size:
             print(f"Estimated size: ~{estimated_size / 1e6:.1f} MB")
-        download_stream(stream_url, output_path, estimated_size)
+        download_stream(stream_url, output_path, estimated_size, api_key=api_key)
 
     for sub in chosen_subs:
         download_subtitle(base, api_key, item_id, sub, filename, out_dir)
