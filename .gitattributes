@@ -1,0 +1,10 @@
+# All text files use LF in the repository *and* in the working tree.
+# This overrides a global core.autocrlf=true, so Windows checkouts stay LF
+# and diffs never show whole-file churn.
+* text=auto eol=lf
+
+# Binary media that must never be touched.
+*.mp4 binary
+*.mkv binary
+*.png binary
+*.jpg binary
