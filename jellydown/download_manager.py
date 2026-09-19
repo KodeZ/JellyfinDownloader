@@ -142,6 +142,11 @@ class DownloadManager:
             job.started_at = time.time()
         if status in (DONE, FAILED, CANCELLED):
             job.finished_at = time.time()
+            job.speed = 0.0
+        if status == DONE and job.downloaded:
+            # Transcoded streams report an estimated total, so the byte count
+            # rarely lands exactly on it. A finished job is 100% by definition.
+            job.total = job.downloaded
         self._emit(EV_STATE, job)
 
     def _progress_cb(self, job: Job):
