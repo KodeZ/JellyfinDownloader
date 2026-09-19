@@ -8,10 +8,14 @@ stage 4 for download enqueue, cancel, and remove keys.
 from __future__ import annotations
 
 import logging
+import textwrap
 import threading
 from pathlib import Path
 from typing import Any
 
+from rich.text import Text
+
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -45,6 +49,46 @@ from .ui import filename_for
 from .utils import format_episode_label, normalize_lang, safe_int
 
 log = logging.getLogger(__name__)
+
+
+# Downloads table geometry. A DataTable clips columns that overflow its
+# viewport rather than reflowing them, so on a narrow terminal Progress and
+# Speed just vanish off the right edge. We size the columns against the pane
+# ourselves, and when four columns cannot fit we stack status/progress/speed
+# into a single multi-line cell: the row gets taller instead of losing data.
+WIDE = "wide"
+STACKED = "stacked"
+
+_STATUS_W = 9          # "cancelled"
+_PROGRESS_W = 9        # "1234.5 MB"
+_SPEED_W = 10          # "123.4 MB/s"
+_STACKED_W = 10        # the three above, one per line
+_CELL_PAD = 2          # DataTable pads every cell by one cell either side
+_MIN_FILE_W = 10       # floor for the stacked layout
+_MIN_FILE_W_WIDE = 20  # below this a four-column File column is unreadable
+_SCROLLBAR_W = 1       # reserved, so the layout cannot flip when it appears
+_FALLBACK_W = 40       # used before the first layout pass gives us a size
+_MAX_FILE_LINES = 2    # a long name wraps, but not without bound
+
+
+def _wrap_filename(name: str, width: int) -> Text:
+    """Fold a filename over at most `_MAX_FILE_LINES` lines.
+
+    Wrapping happens here rather than in the cell renderer so that a very
+    long name reflows into the width it has instead of being clipped, but
+    still can't grow a row without bound on a narrow pane.
+    """
+    if width <= 0:
+        return Text(name, no_wrap=True, overflow="ellipsis")
+    lines = textwrap.wrap(name, width, break_long_words=True,
+                          break_on_hyphens=False) or [""]
+    if len(lines) > _MAX_FILE_LINES:
+        lines = lines[:_MAX_FILE_LINES]
+        last = lines[-1]
+        if len(last) + 1 > width:
+            last = last[:width - 1].rstrip()
+        lines[-1] = last + "…"
+    return Text("\n".join(lines), no_wrap=True, overflow="ellipsis")
 
 
 def _human_speed(speed: float) -> str:
@@ -93,6 +137,18 @@ class _AppLogHandler(logging.Handler):
                 self._app.call_from_thread(self._app.notify, msg, severity=severity)
         except Exception:
             pass
+
+
+class DownloadsTable(DataTable):
+    """Downloads table that re-lays out its columns when the pane resizes."""
+
+    def on_resize(self, event: events.Resize) -> None:
+        relayout = getattr(self.app, "relayout_downloads", None)
+        if relayout is None:
+            return
+        # Deferred: our regions aren't updated for the new size yet, and
+        # the relayout measures them.
+        self.call_after_refresh(relayout)
 
 
 class ButtonRow(Horizontal):
@@ -579,6 +635,8 @@ class JellydownApp(App):
         self._marked: dict[int, str] = {}
         # Active settings edit: dict with key, kind, label, leaf_node, or None.
         self._editing: dict | None = None
+        # Current downloads column layout: (WIDE|STACKED, file column width).
+        self._downloads_shape: tuple[str, int] | None = None
 
     # ---------- Composition ----------
 
@@ -588,7 +646,7 @@ class JellydownApp(App):
             tree: Tree = LibraryTree("Library", id="library")
             tree.guide_depth = 3
             yield tree
-            yield DataTable(id="downloads", zebra_stripes=True)
+            yield DownloadsTable(id="downloads", zebra_stripes=True)
         yield EditBar("", id="edit-bar", classes="hidden")
         yield Footer()
 
@@ -610,7 +668,7 @@ class JellydownApp(App):
 
         table = self.query_one("#downloads", DataTable)
         table.cursor_type = "row"
-        table.add_columns("File", "Status", "Progress", "Speed")
+        self.relayout_downloads()
 
         bar = self.query_one("#edit-bar", EditBar)
         bar.can_focus = False  # only focusable while shown
@@ -814,33 +872,100 @@ class JellydownApp(App):
     def _handle_manager_event(self, ev: str, job) -> None:
         table = self.query_one("#downloads", DataTable)
         if ev == EV_ADDED:
-            row_key = table.add_row(
-                job.filename, job.status, "-", "-",
-                key=job.id,
-            )
-            self._row_keys[job.id] = row_key
-        elif ev == EV_PROGRESS:
-            row_key = self._row_keys.get(job.id)
-            if row_key is None:
-                return
-            cols = table.ordered_columns
-            table.update_cell(row_key, cols[2].key, _human_progress(job.downloaded, job.total))
-            table.update_cell(row_key, cols[3].key, _human_speed(job.speed))
-        elif ev == EV_STATE:
-            row_key = self._row_keys.get(job.id)
-            if row_key is None:
-                return
-            cols = table.ordered_columns
-            table.update_cell(row_key, cols[1].key, job.status)
-            # A finished job's last progress event may lag behind the final
-            # byte count, so repaint progress/speed from the settled job.
-            table.update_cell(row_key, cols[2].key,
-                              _human_progress(job.downloaded, job.total))
-            table.update_cell(row_key, cols[3].key, _human_speed(job.speed))
+            self._add_download_row(table, job)
+        elif ev in (EV_PROGRESS, EV_STATE):
+            # Repaint every cell rather than just the one the event is about: a
+            # finished job's last progress event can lag behind its final byte
+            # count, and in STACKED layout they share one cell anyway.
+            self._update_download_row(table, job)
         elif ev == EV_REMOVED:
             row_key = self._row_keys.pop(job.id, None)
             if row_key is not None:
                 table.remove_row(row_key)
+
+    # ---------- Downloads table layout ----------
+
+    def _downloads_width(self) -> int:
+        """Width available to the downloads table, reserving the scrollbar.
+
+        Measured from `container_size` rather than `size` so the number does
+        not change when a vertical scrollbar appears, which would otherwise
+        let the layout oscillate: narrower columns wrap more, taller rows
+        summon the scrollbar, the scrollbar narrows the columns again.
+        """
+        table = self.query_one("#downloads", DataTable)
+        width = table.container_size.width or table.size.width
+        return max(width - _SCROLLBAR_W, 0)
+
+    @staticmethod
+    def _downloads_layout(width: int) -> tuple[str, int]:
+        """Choose a column layout and File column width for `width` cells."""
+        wide_fixed = _STATUS_W + _PROGRESS_W + _SPEED_W + 4 * _CELL_PAD
+        if width - wide_fixed >= _MIN_FILE_W_WIDE:
+            return WIDE, width - wide_fixed
+        stacked_fixed = _STACKED_W + 2 * _CELL_PAD
+        return STACKED, max(width - stacked_fixed, _MIN_FILE_W)
+
+    def relayout_downloads(self) -> None:
+        """Rebuild the downloads columns if the pane changed shape.
+
+        Called on mount and from `DownloadsTable.on_resize`. Rebuilding is a
+        no-op unless the layout or the File column width actually moved, so
+        dragging a terminal edge does not churn the table on every cell.
+        """
+        width = self._downloads_width() or _FALLBACK_W
+        shape = self._downloads_layout(width)
+        if shape == self._downloads_shape:
+            return
+        self._downloads_shape = shape
+        self._rebuild_downloads(*shape)
+
+    def _rebuild_downloads(self, layout: str, file_w: int) -> None:
+        table = self.query_one("#downloads", DataTable)
+        focused = self._focused_job_id()
+        table.clear(columns=True)
+        self._row_keys.clear()
+        table.add_column("File", width=file_w, key="file")
+        if layout == WIDE:
+            table.add_column("Status", width=_STATUS_W, key="status")
+            table.add_column("Progress", width=_PROGRESS_W, key="progress")
+            table.add_column("Speed", width=_SPEED_W, key="speed")
+        else:
+            table.add_column("Status", width=_STACKED_W, key="status")
+        for job in self.manager.jobs():
+            self._add_download_row(table, job)
+        if focused is not None and focused in self._row_keys:
+            try:
+                table.move_cursor(row=table.get_row_index(self._row_keys[focused]))
+            except Exception:
+                pass
+
+    def _download_cells(self, job) -> list:
+        """Cells for one job, shaped to the current column layout."""
+        layout, file_w = self._downloads_shape or (WIDE, _FALLBACK_W)
+        name = _wrap_filename(job.filename, file_w)
+        progress = _human_progress(job.downloaded, job.total)
+        speed = _human_speed(job.speed)
+        if layout == WIDE:
+            return [name, job.status, progress, speed]
+        return [name, Text("\n".join((job.status, progress, speed)), no_wrap=True)]
+
+    def _add_download_row(self, table: DataTable, job) -> None:
+        # height=None auto-sizes the row, which is what lets a wrapped
+        # filename or a stacked status cell claim the lines it needs.
+        self._row_keys[job.id] = table.add_row(
+            *self._download_cells(job), key=job.id, height=None,
+        )
+
+    def _update_download_row(self, table: DataTable, job) -> None:
+        row_key = self._row_keys.get(job.id)
+        if row_key is None:
+            return
+        # The filename never changes; skip it so we don't re-measure it on
+        # every progress tick.
+        cells = self._download_cells(job)[1:]
+        for column_key, cell in zip(("status", "progress", "speed"), cells):
+            table.update_cell(row_key, column_key, cell)
 
     # ---------- Actions: download / cancel / remove ----------
 
