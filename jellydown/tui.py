@@ -832,6 +832,11 @@ class JellydownApp(App):
                 return
             cols = table.ordered_columns
             table.update_cell(row_key, cols[1].key, job.status)
+            # A finished job's last progress event may lag behind the final
+            # byte count, so repaint progress/speed from the settled job.
+            table.update_cell(row_key, cols[2].key,
+                              _human_progress(job.downloaded, job.total))
+            table.update_cell(row_key, cols[3].key, _human_speed(job.speed))
         elif ev == EV_REMOVED:
             row_key = self._row_keys.pop(job.id, None)
             if row_key is not None:
